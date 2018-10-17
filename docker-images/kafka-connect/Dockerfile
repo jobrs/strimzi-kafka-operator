@@ -1,4 +1,4 @@
-FROM strimzi/kafka-base:0.6.0
+FROM strimzi/kafka-base:0.8.0
 
 EXPOSE 8083 9404
 
