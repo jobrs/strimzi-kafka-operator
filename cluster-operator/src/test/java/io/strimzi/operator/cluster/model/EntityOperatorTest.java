@@ -5,6 +5,7 @@
 package io.strimzi.operator.cluster.model;
 
 import io.fabric8.kubernetes.api.model.Container;
+import io.fabric8.kubernetes.api.model.VolumeMount;
 import io.fabric8.kubernetes.api.model.extensions.Deployment;
 import io.strimzi.api.kafka.model.EntityOperatorSpec;
 import io.strimzi.api.kafka.model.EntityOperatorSpecBuilder;
@@ -14,20 +15,26 @@ import io.strimzi.api.kafka.model.EntityUserOperatorSpec;
 import io.strimzi.api.kafka.model.EntityUserOperatorSpecBuilder;
 import io.strimzi.api.kafka.model.Kafka;
 import io.strimzi.api.kafka.model.KafkaBuilder;
-import io.strimzi.certs.CertManager;
+import io.strimzi.api.kafka.model.TlsSidecarLogLevel;
 import io.strimzi.operator.cluster.ResourceUtils;
-import io.strimzi.operator.common.operator.MockCertManager;
 import org.junit.AfterClass;
 import org.junit.Rule;
 import org.junit.Test;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
+import static io.strimzi.test.TestUtils.map;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 
 public class EntityOperatorTest {
+
+    static Map<String, String> volumeMounts(List<VolumeMount> mounts) {
+        return mounts.stream().collect(Collectors.toMap(vm -> vm.getName(), vm -> vm.getMountPath()));
+    }
 
     private final String namespace = "test";
     private final String cluster = "foo";
@@ -53,13 +60,12 @@ public class EntityOperatorTest {
                     .endSpec()
                     .build();
 
-    private final CertManager certManager = new MockCertManager();
-    private final EntityOperator entityOperator = EntityOperator.fromCrd(certManager, resource, ResourceUtils.createKafkaClusterInitialSecrets(namespace, cluster));
+    private final EntityOperator entityOperator = EntityOperator.fromCrd(resource);
 
     @Test
     public void testGenerateDeployment() {
 
-        Deployment dep = entityOperator.generateDeployment();
+        Deployment dep = entityOperator.generateDeployment(true);
 
         List<Container> containers = dep.getSpec().getTemplate().getSpec().getContainers();
 
@@ -74,10 +80,14 @@ public class EntityOperatorTest {
         assertEquals(EntityTopicOperator.TOPIC_OPERATOR_CONTAINER_NAME, containers.get(0).getName());
         assertEquals(EntityUserOperator.USER_OPERATOR_CONTAINER_NAME, containers.get(1).getName());
         // checks on the TLS sidecar container
-        assertEquals(EntityOperatorSpec.DEFAULT_TLS_SIDECAR_IMAGE, containers.get(2).getImage());
-        assertEquals(EntityOperator.defaultZookeeperConnect(cluster), AbstractModel.containerEnvVars(containers.get(2)).get(EntityOperator.ENV_VAR_ZOOKEEPER_CONNECT));
-        assertEquals(EntityOperator.TLS_SIDECAR_VOLUME_NAME, containers.get(2).getVolumeMounts().get(0).getName());
-        assertEquals(EntityOperator.TLS_SIDECAR_VOLUME_MOUNT, containers.get(2).getVolumeMounts().get(0).getMountPath());
+        Container tlsSidecarContainer = containers.get(2);
+        assertEquals(EntityOperatorSpec.DEFAULT_TLS_SIDECAR_IMAGE, tlsSidecarContainer.getImage());
+        assertEquals(EntityOperator.defaultZookeeperConnect(cluster), AbstractModel.containerEnvVars(tlsSidecarContainer).get(EntityOperator.ENV_VAR_ZOOKEEPER_CONNECT));
+        assertEquals(TlsSidecarLogLevel.NOTICE.toValue(), AbstractModel.containerEnvVars(tlsSidecarContainer).get(EntityOperator.ENV_VAR_TLS_SIDECAR_LOG_LEVEL));
+        assertEquals(map(
+                EntityOperator.TLS_SIDECAR_CA_CERTS_VOLUME_NAME, EntityOperator.TLS_SIDECAR_CA_CERTS_VOLUME_MOUNT,
+                EntityOperator.TLS_SIDECAR_EO_CERTS_VOLUME_NAME, EntityOperator.TLS_SIDECAR_EO_CERTS_VOLUME_MOUNT),
+                EntityOperatorTest.volumeMounts(tlsSidecarContainer.getVolumeMounts()));
     }
 
     @Test
@@ -96,7 +106,7 @@ public class EntityOperatorTest {
                         .withEntityOperator(entityOperatorSpec)
                         .endSpec()
                         .build();
-        EntityOperator entityOperator = EntityOperator.fromCrd(certManager, resource, ResourceUtils.createKafkaClusterInitialSecrets(namespace, cluster));
+        EntityOperator entityOperator = EntityOperator.fromCrd(resource);
 
         assertNull(entityOperator.getTopicOperator());
         assertNull(entityOperator.getUserOperator());
@@ -107,7 +117,7 @@ public class EntityOperatorTest {
 
     @Test
     public void withAffinity() throws IOException {
-        helper.assertDesiredResource("-Deployment.yaml", zc -> zc.generateDeployment().getSpec().getTemplate().getSpec().getAffinity());
+        helper.assertDesiredResource("-Deployment.yaml", zc -> zc.generateDeployment(true).getSpec().getTemplate().getSpec().getAffinity());
     }
 
     @AfterClass

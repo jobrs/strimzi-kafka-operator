@@ -70,10 +70,13 @@ public class KafkaConnectAssemblyOperator extends AbstractAssemblyOperator<Kuber
 
     @Override
     protected Future<Void> createOrUpdate(Reconciliation reconciliation, KafkaConnect kafkaConnect) {
-
         String namespace = reconciliation.namespace();
         String name = reconciliation.name();
         KafkaConnectCluster connect;
+        if (kafkaConnect.getSpec() == null) {
+            log.error("{} spec cannot be null", kafkaConnect.getMetadata().getName());
+            return Future.failedFuture("Spec cannot be null");
+        }
         try {
             connect = KafkaConnectCluster.fromCrd(kafkaConnect);
         } catch (Exception e) {
@@ -91,7 +94,7 @@ public class KafkaConnectAssemblyOperator extends AbstractAssemblyOperator<Kuber
         return deploymentOperations.scaleDown(namespace, connect.getName(), connect.getReplicas())
                 .compose(scale -> serviceOperations.reconcile(namespace, connect.getServiceName(), connect.generateService()))
                 .compose(i -> configMapOperations.reconcile(namespace, connect.getAncillaryConfigName(), logAndMetricsConfigMap))
-                .compose(i -> deploymentOperations.reconcile(namespace, connect.getName(), connect.generateDeployment(annotations)))
+                .compose(i -> deploymentOperations.reconcile(namespace, connect.getName(), connect.generateDeployment(annotations, isOpenShift)))
                 .compose(i -> deploymentOperations.scaleUp(namespace, connect.getName(), connect.getReplicas()).map((Void) null));
     }
 

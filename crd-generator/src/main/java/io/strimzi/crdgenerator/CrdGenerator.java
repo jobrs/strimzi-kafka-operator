@@ -31,6 +31,7 @@ import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
@@ -42,8 +43,10 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 
+import static io.strimzi.crdgenerator.Property.hasAnyGetterAndAnySetter;
 import static io.strimzi.crdgenerator.Property.properties;
 import static io.strimzi.crdgenerator.Property.sortedProperties;
+import static io.strimzi.crdgenerator.Property.subtypes;
 import static java.lang.reflect.Modifier.isAbstract;
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyMap;
@@ -56,7 +59,7 @@ import static java.util.Collections.emptyMap;
  * K8S CRD validation schema support, which is more limited that the full OpenAPI schema
  * supported in the rest of K8S.</p>
  *
- * <p>The tool works be recursing through class properties (in the JavaBeans sense)
+ * <p>The tool works by recursing through class properties (in the JavaBeans sense)
  * and the types of those properties, guided by the annotations.</p>
  *
  * <h3>Annotations</h3>
@@ -289,7 +292,13 @@ public class CrdGenerator {
             checkForBuilderClass(crdClass, crdClass.getName() + "Fluent");
             checkForBuilderClass(crdClass, crdClass.getName() + "FluentImpl");
         }
-
+        if (!Modifier.isAbstract(crdClass.getModifiers())) {
+            hasAnyGetterAndAnySetter(crdClass);
+        } else {
+            for (Class c : subtypes(crdClass)) {
+                hasAnyGetterAndAnySetter(c);
+            }
+        }
     }
 
     private void checkForBuilderClass(Class<?> crdClass, String builderClass) {
@@ -506,7 +515,7 @@ public class CrdGenerator {
         }
 
         CrdGenerator generator = new CrdGenerator(yaml ?
-                new YAMLMapper().configure(YAMLGenerator.Feature.MINIMIZE_QUOTES, true) :
+                new YAMLMapper().configure(YAMLGenerator.Feature.MINIMIZE_QUOTES, true).configure(YAMLGenerator.Feature.WRITE_DOC_START_MARKER, false) :
                 new ObjectMapper(), labels);
         for (Map.Entry<String, Class<? extends CustomResource>> entry : classes.entrySet()) {
             File file = new File(entry.getKey());

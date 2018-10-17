@@ -1,11 +1,14 @@
 PROJECT_NAME=helm-charts
 
+include ../Makefile.os
+
 RELEASE_VERSION ?= latest
 CHART_SEMANTIC_RELEASE_VERSION ?= $(shell cat ../release.version | tr A-Z a-z)
 CHART_NAME=strimzi-kafka-operator
 CHART_PATH=./$(CHART_NAME)/
 CHART_RENDERED_TEMPLATES_TMP=../target/charts
-CHART_RENDERED_TEMPLATES_EXAMPLES=../examples/install/cluster-operator/
+CHART_RENDERED_TEMPLATES_CLUSTERROLES=../cluster-operator/src/main/resources/cluster-roles/
+CHART_RENDERED_TEMPLATES_INSTALL=../install/cluster-operator/
 
 helm_clean:
 	rm -rf $(CHART_RENDERED_TEMPLATES_TMP)
@@ -21,21 +24,29 @@ helm_template:
 	mkdir -p $(CHART_RENDERED_TEMPLATES_TMP)
 	helm template --namespace myproject --output-dir $(CHART_RENDERED_TEMPLATES_TMP) $(CHART_PATH)
 
-helm_examples: helm_clean helm_template
+helm_install: helm_clean helm_template
 	# Remove Helm-related labels
-	find $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*.yaml' -exec yq d -i {} metadata.labels.chart \;
-	find $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*.yaml' -exec yq d -i {} metadata.labels.component \;
-	find $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*.yaml' -exec yq d -i {} metadata.labels.release \;
-	find $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*.yaml' -exec yq d -i {} metadata.labels.heritage \;
-	# Copying rendered template files to: $(CHART_RENDERED_TEMPLATES_EXAMPLES)
-	mkdir -p $(CHART_RENDERED_TEMPLATES_EXAMPLES)
+	$(FIND) $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*.yaml' -exec $(SED) -i '/^---/d' {} \;
+	$(FIND) $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*.yaml' -exec yq d -i {} metadata.labels.chart \;
+	$(FIND) $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*.yaml' -exec yq d -i {} metadata.labels.component \;
+	$(FIND) $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*.yaml' -exec yq d -i {} metadata.labels.release \;
+	$(FIND) $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*.yaml' -exec yq d -i {} metadata.labels.heritage \;
+	$(FIND) $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*.yaml' -exec yq d -i {} metadata.namespace \;
+	# Copying rendered template files to: $(CHART_RENDERED_TEMPLATES_INSTALL)
+	mkdir -p $(CHART_RENDERED_TEMPLATES_INSTALL)
 	# Find rendered resources which are not CustomResourceDefinition and move them
-	find $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*.yaml' -printf "%p " -exec yq r {} kind \; \
+	$(FIND) $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*.yaml' -printf "%p " -exec yq r {} kind \; \
 	| grep -v 'CustomResourceDefinition$$' \
-	| sed -E 's/([^ ]*) ([a-zA-Z0-9]*)$$/\1/' \
-	| xargs -IFILE cp FILE $(CHART_RENDERED_TEMPLATES_EXAMPLES)
+	| $(SED) -E 's/([^ ]*) ([a-zA-Z0-9]*)$$/\1/' \
+	| xargs -IFILE cp FILE $(CHART_RENDERED_TEMPLATES_INSTALL)
+	# Copying rendered template files to: $(CHART_RENDERED_TEMPLATES_CLUSTERROLES)
+	mkdir -p $(CHART_RENDERED_TEMPLATES_CLUSTERROLES)
+	# Find rendered resources which are not CustomResourceDefinition and move them
+	$(FIND) $(CHART_RENDERED_TEMPLATES_TMP) -type f -name '*ClusterRole-*.yaml' -printf "%p " -exec yq r {} kind \; \
+	| $(SED) -E 's/([^ ]*) ([a-zA-Z0-9]*)$$/\1/' \
+	| xargs -IFILE cp FILE $(CHART_RENDERED_TEMPLATES_CLUSTERROLES)
 
-helm_pkg: helm_lint helm_examples
+helm_pkg: helm_lint helm_install
 	# Copying unarchived Helm Chart to release directory
 	mkdir -p strimzi-$(RELEASE_VERSION)/charts/
 	cp -r $(CHART_PATH) strimzi-$(RELEASE_VERSION)/charts/$(CHART_NAME)

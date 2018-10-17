@@ -3,9 +3,9 @@
 // assembly-kafka-connect-replicas.adoc
 
 [id='proc-configuring-kafka-connect-replicas-{context}']
-= Configuring the number of broker nodes
+= Configuring the number of nodes
 
-Number of Kafka broker nodes can be configured using the `replicas` property in `KafkaConnect.spec` and `KafkaConnectS2I.spec`.
+Number of Kafka Connect nodes can be configured using the `replicas` property in `KafkaConnect.spec` and `KafkaConnectS2I.spec`.
 
 .Prerequisites
 
@@ -34,10 +34,10 @@ spec:
 ifdef::Kubernetes[]
 On {KubernetesName} this can be done using `kubectl apply`:
 [source,shell,subs=+quotes]
-kubectl apply -f _<your-file>_
+kubectl apply -f _your-file_
 +
 endif::Kubernetes[]
 On {OpenShiftName} this can be done using `oc apply`:
 +
 [source,shell,subs=+quotes]
-oc apply -f _<your-file>_
+oc apply -f _your-file_

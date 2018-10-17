@@ -1,12 +1,15 @@
-#!/bin/bash
+    #!/bin/bash
 
-# path were the Secret with certificates is mounted
-CERTS=/etc/tls-sidecar/certs
+# path were the Secret with ZK nodes certificates is mounted
+NODE_CERTS_KEYS=/etc/tls-sidecar/zookeeper-nodes
+# Combine all the certs in the cluster CA into one file
+CA_CERTS=/tmp/cluster-ca.crt
+cat /etc/tls-sidecar/cluster-ca-certs/*.crt > "$CA_CERTS"
 
 echo "pid = /usr/local/var/run/stunnel.pid"
 echo "foreground = yes"
-echo "debug = info"
- 
+echo "debug = $TLS_SIDECAR_LOG_LEVEL"
+
 declare -a PORTS=("2888" "3888")
 
 CURRENT=${BASE_HOSTNAME}-$((ZOOKEEPER_ID-1))
@@ -24,11 +27,12 @@ do
 			cat <<-EOF
 			[${PEER}-$port]
 			client = yes
-			CAfile = ${CERTS}/cluster-ca.crt
-			cert = ${CERTS}/${CURRENT}.crt
-			key = ${CERTS}/${CURRENT}.key
+			CAfile = ${CA_CERTS}
+			cert = ${NODE_CERTS_KEYS}/${CURRENT}.crt
+			key = ${NODE_CERTS_KEYS}/${CURRENT}.key
 			accept = 127.0.0.1:$(expr $port \* 10 + $NODE - 1)
 			connect = ${PEER}.${BASE_FQDN}:$port
+			delay = yes
 			verify = 2
 
 			EOF
@@ -43,9 +47,9 @@ do
 	cat <<-EOF
 	[listener-$port]
 	client = no
-	CAfile = ${CERTS}/cluster-ca.crt
-	cert = ${CERTS}/${CURRENT}.crt
-	key = ${CERTS}/${CURRENT}.key
+	CAfile = ${CA_CERTS}
+	cert = ${NODE_CERTS_KEYS}/${CURRENT}.crt
+	key = ${NODE_CERTS_KEYS}/${CURRENT}.key
 	accept = $port
 	connect = 127.0.0.1:$CONNECTOR_PORT
 	verify = 2
@@ -59,9 +63,10 @@ CLIENT_PORT=$(expr 21810 + $ZOOKEEPER_ID - 1)
 cat <<-EOF
 [listener-2181]
 client = no
-CAfile = ${CERTS}/cluster-ca.crt
-cert = ${CERTS}/${CURRENT}.crt
-key = ${CERTS}/${CURRENT}.key
+CAfile = ${CA_CERTS}
+cert = ${NODE_CERTS_KEYS}/${CURRENT}.crt
+key = ${NODE_CERTS_KEYS}/${CURRENT}.key
 accept = 2181
 connect = 127.0.0.1:$CLIENT_PORT
+verify = 2
 EOF

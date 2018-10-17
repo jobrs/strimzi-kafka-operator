@@ -1,15 +1,18 @@
 TOPDIR=$(dir $(lastword $(MAKEFILE_LIST)))
+
+include ./Makefile.os
+
 RELEASE_VERSION ?= latest
 CHART_PATH ?= ./helm-charts/strimzi-kafka-operator/
 CHART_SEMANTIC_RELEASE_VERSION ?= $(shell cat ./release.version | tr A-Z a-z)
 
-SUBDIRS=docker-images test crd-generator api certificate-manager operator-common cluster-operator topic-operator user-operator kafka-init helm-charts examples
+SUBDIRS=docker-images helm-charts test crd-generator api certificate-manager operator-common cluster-operator topic-operator user-operator kafka-init install examples metrics
 DOCKER_TARGETS=docker_build docker_push docker_tag
 
 all: $(SUBDIRS)
 clean: $(SUBDIRS) docu_clean
-$(DOCKER_TARGETS): $(SUBDIRS)
-release: release_prepare release_version release_helm_version release_maven $(SUBDIRS) release_docu release_pkg release_helm_repo docu_clean
+$(DOCKER_TARGETS): helm_install $(SUBDIRS)
+release: release_prepare release_version release_helm_version release_maven $(SUBDIRS) release_docu release_single_file release_pkg release_helm_repo docu_clean
 
 next_version:
 	echo $(shell echo $(NEXT_VERSION) | tr a-z A-Z) > release.version
@@ -25,9 +28,9 @@ release_prepare:
 release_version:
 	# TODO: This would be replaced ideally once Helm Chart templating is used for cluster and topic operator examples
 	echo "Changing Docker image tags to :$(RELEASE_VERSION)"
-	find ./examples -name '*.yaml' -type f -exec sed -i '/image: "\?strimzi\/[a-zA-Z0-9_-.]\+:[a-zA-Z0-9_-.]\+"\?/s/:[a-zA-Z0-9_-.]\+/:$(RELEASE_VERSION)/g' {} \;
-	find ./examples -name '*.yaml' -type f -exec sed -i '/name: [a-zA-Z0-9_-]*IMAGE_TAG/{n;s/value: [a-zA-Z0-9_-.]\+/value: $(RELEASE_VERSION)/}' {} \;
-	find ./examples -name '*.yaml' -type f -exec sed -i '/name: STRIMZI_DEFAULT_[a-zA-Z0-9_-]*IMAGE/{n;s/:[a-zA-Z0-9_-.]\+/:$(RELEASE_VERSION)/}' {} \;
+	$(FIND) ./install -name '*.yaml' -type f -exec $(SED) -i '/image: "\?strimzi\/[a-zA-Z0-9_-.]\+:[a-zA-Z0-9_-.]\+"\?/s/:[a-zA-Z0-9_-.]\+/:$(RELEASE_VERSION)/g' {} \;
+	$(FIND) ./install -name '*.yaml' -type f -exec $(SED) -i '/name: [a-zA-Z0-9_-]*IMAGE_TAG/{n;s/value: [a-zA-Z0-9_-.]\+/value: $(RELEASE_VERSION)/}' {} \;
+	$(FIND) ./install -name '*.yaml' -type f -exec $(SED) -i '/name: STRIMZI_DEFAULT_[a-zA-Z0-9_-]*IMAGE/{n;s/:[a-zA-Z0-9_-.]\+/:$(RELEASE_VERSION)/}' {} \;
 
 release_maven:
 	echo "Update pom versions to $(RELEASE_VERSION)"
@@ -42,14 +45,19 @@ release_pkg: helm_pkg
 release_helm_version:
 	echo "Updating default image tags in Helm Chart to $(RELEASE_VERSION)"
 	# Update default image tag in chart values.yaml to RELEASE_VERSION
-	sed -i 's/\(tag: \).*/\1$(RELEASE_VERSION)/g' $(CHART_PATH)values.yaml
+	$(SED) -i 's/\(tag: \).*/\1$(RELEASE_VERSION)/g' $(CHART_PATH)values.yaml
 	# Update default image tag in chart README.md config grid with RELEASE_VERSION
-	sed -i 's/\(image\.tag[^\n]*| \)`.*`/\1`$(RELEASE_VERSION)`/g' $(CHART_PATH)README.md
+	$(SED) -i 's/\(image\.tag[^\n]*| \)`.*`/\1`$(RELEASE_VERSION)`/g' $(CHART_PATH)README.md
 
 release_helm_repo:
 	echo "Updating Helm Repository index.yaml"
 	helm repo index ./ --url https://github.com/strimzi/strimzi-kafka-operator/releases/download/$(RELEASE_VERSION)/ --merge ./helm-charts/index.yaml
 	mv ./index.yaml ./helm-charts/index.yaml
+
+release_single_file:
+	$(FIND) ./strimzi-$(RELEASE_VERSION)/install/cluster-operator/ -type f -exec cat {} \; -exec printf "\n---\n" \; > strimzi-cluster-operator-$(RELEASE_VERSION).yaml
+	$(FIND) ./strimzi-$(RELEASE_VERSION)/install/topic-operator/ -type f -exec cat {} \; -exec printf "\n---\n" \; > strimzi-topic-operator-$(RELEASE_VERSION).yaml
+	$(FIND) ./strimzi-$(RELEASE_VERSION)/install/user-operator/ -type f -exec cat {} \; -exec printf "\n---\n" \; > strimzi-user-operator-$(RELEASE_VERSION).yaml
 
 helm_pkg:
 	# Copying unarchived Helm Chart to release directory
@@ -57,6 +65,7 @@ helm_pkg:
 	cp -r $(CHART_PATH) strimzi-$(RELEASE_VERSION)/charts/$(CHART_NAME)
 	# Packaging helm chart with semantic version: $(CHART_SEMANTIC_RELEASE_VERSION)
 	helm package --version $(CHART_SEMANTIC_RELEASE_VERSION) --app-version $(CHART_SEMANTIC_RELEASE_VERSION) --destination ./ $(CHART_PATH)
+	mv strimzi-kafka-operator-$(CHART_SEMANTIC_RELEASE_VERSION).tgz strimzi-kafka-operator-helm-chart-$(CHART_SEMANTIC_RELEASE_VERSION).tgz
 	rm -rf strimzi-$(RELEASE_VERSION)/charts/
 
 docu_html: docu_htmlclean docu_check
@@ -78,6 +87,9 @@ docu_check:
 docu_pushtowebsite: docu_htmlnoheader docu_html
 	./.travis/docu-push-to-website.sh
 
+pushtonexus:
+	./.travis/push-to-nexus.sh
+
 release_docu: docu_html docu_htmlnoheader
 	mkdir -p strimzi-$(RELEASE_VERSION)/docs
 	cp -rv documentation/html/index.html strimzi-$(RELEASE_VERSION)/docs/
@@ -94,7 +106,7 @@ docu_htmlnoheaderclean:
 systemtests:
 	./systemtest/scripts/run_tests.sh $(SYSTEMTEST_ARGS)
 
-helm_examples: helm-charts
+helm_install: helm-charts
 
 $(SUBDIRS):
 	$(MAKE) -C $@ $(MAKECMDGOALS)

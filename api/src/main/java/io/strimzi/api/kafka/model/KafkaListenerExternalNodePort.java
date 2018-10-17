@@ -4,6 +4,7 @@
  */
 package io.strimzi.api.kafka.model;
 
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import io.strimzi.crdgenerator.annotations.Description;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
@@ -19,12 +20,14 @@ import io.sundr.builder.annotations.Buildable;
         builderPackage = "io.fabric8.kubernetes.api.builder"
 )
 @JsonInclude(JsonInclude.Include.NON_NULL)
+@JsonPropertyOrder({"type", "authentication"})
 public class KafkaListenerExternalNodePort extends KafkaListenerExternal {
     private static final long serialVersionUID = 1L;
 
     public static final String TYPE_NODEPORT = "nodeport";
 
     private KafkaListenerAuthentication auth;
+    private boolean tls = true;
 
     @Description("Must be `" + TYPE_NODEPORT + "`")
     @Override
@@ -41,5 +44,16 @@ public class KafkaListenerExternalNodePort extends KafkaListenerExternal {
 
     public void setAuth(KafkaListenerAuthentication auth) {
         this.auth = auth;
+    }
+
+    @Description("Enables TLS encryption on the listener. " +
+            "By default set to `true` for enabled TLS encryption.")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public boolean isTls() {
+        return tls;
+    }
+
+    public void setTls(boolean tls) {
+        this.tls = tls;
     }
 }

@@ -58,29 +58,22 @@ import io.strimzi.api.kafka.model.Logging;
 import io.strimzi.api.kafka.model.PersistentClaimStorage;
 import io.strimzi.api.kafka.model.Resources;
 import io.strimzi.api.kafka.model.Storage;
-import io.strimzi.certs.CertAndKey;
-import io.strimzi.certs.CertManager;
-import io.strimzi.certs.Subject;
 import io.strimzi.operator.cluster.ClusterOperator;
 import io.strimzi.operator.common.model.Labels;
 import io.vertx.core.json.JsonObject;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.StringWriter;
-import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.function.BiFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -93,12 +86,8 @@ public abstract class AbstractModel {
 
     protected static final Logger log = LogManager.getLogger(AbstractModel.class.getName());
 
-    // the Kubernetes service DNS domain is customizable on cluster creation but it's "cluster.local" by default
-    // there is no clean way to get it from a running application so we are passing it through an env var
-    public static final String KUBERNETES_SERVICE_DNS_DOMAIN =
-            System.getenv().getOrDefault("KUBERNETES_SERVICE_DNS_DOMAIN", "cluster.local");
-
     protected static final int CERTS_EXPIRATION_DAYS = 365;
+    protected static final String DEFAULT_JVM_XMS = "128M";
 
     private static final String VOLUME_MOUNT_HACK_IMAGE = "busybox";
     protected static final String VOLUME_MOUNT_HACK_NAME = "volume-mount-hack";
@@ -162,7 +151,6 @@ public abstract class AbstractModel {
     private String[] validLoggerValues = new String[]{"INFO", "ERROR", "WARN", "TRACE", "DEBUG", "FATAL", "OFF" };
     private Logging logging;
 
-    protected CertAndKey clusterCA;
 
     // Owner Reference information
     private String ownerApiVersion;
@@ -298,7 +286,7 @@ public abstract class AbstractModel {
         try {
             newSettings.store(sw, "Do not change this generated file. Logging can be configured in the corresponding kubernetes/openshift resource.");
         } catch (IOException e) {
-            e.printStackTrace();
+            log.warn("Error creating properties", e);
         }
         // remove date comment, because it is updated with each reconciliation which leads to restarting pods
         return sw.toString().replaceAll("#[A-Za-z]+ [A-Za-z]+ [0-9]+ [0-9]+:[0-9]+:[0-9]+ [A-Z]+ [0-9]+", "");
@@ -486,8 +474,8 @@ public abstract class AbstractModel {
         return getPersistentVolumeClaimName(name,  podId);
     }
 
-    public static String getPersistentVolumeClaimName(String kafkaClusterName, int podId) {
-        return VOLUME_NAME + "-" + kafkaClusterName + "-" + podId;
+    public static String getPersistentVolumeClaimName(String name, int podId) {
+        return VOLUME_NAME + "-" + name + "-" + podId;
     }
 
     public String getPodName(int podId) {
@@ -638,9 +626,14 @@ public abstract class AbstractModel {
                 .build();
     }
 
-    protected Volume createSecretVolume(String name, String secretName) {
+    protected Volume createSecretVolume(String name, String secretName, boolean isOpenshift) {
+        int mode = 0444;
+        if (isOpenshift) {
+            mode = 0440;
+        }
 
         SecretVolumeSource secretVolumeSource = new SecretVolumeSourceBuilder()
+                .withDefaultMode(mode)
                 .withSecretName(secretName)
                 .build();
 
@@ -973,13 +966,23 @@ public abstract class AbstractModel {
             // Honour explicit max heap
             kafkaHeapOpts.append(' ').append("-Xmx").append(xmx);
         } else {
-            // Otherwise delegate to the container to figure out
-            // Using whatever cgroup memory limit has been set by the k8s infra
-            envVars.add(buildEnvVar(ENV_VAR_DYNAMIC_HEAP_FRACTION, Double.toString(dynamicHeapFraction)));
-            if (dynamicHeapMaxBytes > 0) {
-                envVars.add(buildEnvVar(ENV_VAR_DYNAMIC_HEAP_MAX, Long.toString(dynamicHeapMaxBytes)));
+            Resources resources = getResources();
+            CpuMemory cpuMemory = resources == null ? null : resources.getLimits();
+
+            // Delegate to the container to figure out only when CGroup memory limits are defined to prevent allocating
+            // too much memory on the kubelet.
+            if (cpuMemory != null && cpuMemory.getMemory() != null) {
+                envVars.add(buildEnvVar(ENV_VAR_DYNAMIC_HEAP_FRACTION, Double.toString(dynamicHeapFraction)));
+                if (dynamicHeapMaxBytes > 0) {
+                    envVars.add(buildEnvVar(ENV_VAR_DYNAMIC_HEAP_MAX, Long.toString(dynamicHeapMaxBytes)));
+                }
+            // When no memory limit, `Xms`, and `Xmx` are defined then set a default `Xms` and
+            // leave `Xmx` undefined.
+            } else if (xms == null) {
+                kafkaHeapOpts.append("-Xms").append(DEFAULT_JVM_XMS);
             }
         }
+
         String trim = kafkaHeapOpts.toString().trim();
         if (!trim.isEmpty()) {
             envVars.add(buildEnvVar(ENV_VAR_KAFKA_HEAP_OPTS, trim));
@@ -1018,117 +1021,6 @@ public abstract class AbstractModel {
         if (!trim.isEmpty()) {
             envVars.add(buildEnvVar(ENV_VAR_KAFKA_JVM_PERFORMANCE_OPTS, trim));
         }
-    }
-
-    /**
-     * Decode from Base64 a keyed value from a Secret
-     *
-     * @param secret Secret from which decoding the value
-     * @param key Key of the value to decode
-     * @return decoded value
-     */
-    protected byte[] decodeFromSecret(Secret secret, String key) {
-        return Base64.getDecoder().decode(secret.getData().get(key));
-    }
-
-    /**
-     * Copy already existing certificates from provided Secret based on number of effective replicas
-     * and maybe generate new ones for new replicas (i.e. scale-up)
-     *
-     * @param certManager CertManager instance for handling certificates creation
-     * @param secret The Secret from which getting already existing certificates
-     * @param replicasInSecret How many certificates are in the Secret
-     * @param caCert CA certificate to use for signing new certificates
-     * @param podName A function for resolving the Pod name
-     * @return Collection with certificates
-     * @throws IOException
-     */
-    protected Map<String, CertAndKey> maybeCopyOrGenerateCerts(CertManager certManager, Secret secret, int replicasInSecret, CertAndKey caCert, BiFunction<String, Integer, String> podName) throws IOException {
-        return maybeCopyOrGenerateCerts(certManager, secret, replicasInSecret, caCert, podName, null, Collections.EMPTY_MAP);
-    }
-
-    /**
-     * Copy already existing certificates from provided Secret based on number of effective replicas
-     * and maybe generate new ones for new replicas (i.e. scale-up)
-     *
-     * @param certManager CertManager instance for handling certificates creation
-     * @param secret The Secret from which getting already existing certificates
-     * @param replicasInSecret How many certificates are in the Secret
-     * @param caCert CA certificate to use for signing new certificates
-     * @param podName A function for resolving the Pod name
-     * @param externalBootstrapAddress External address to the bootstrap service
-     * @param externalAddresses Map with external addresses under which the individual pods are available
-     * @return Collection with certificates
-     * @throws IOException
-     */
-    protected Map<String, CertAndKey> maybeCopyOrGenerateCerts(CertManager certManager, Secret secret, int replicasInSecret, CertAndKey caCert, BiFunction<String, Integer, String> podName, String externalBootstrapAddress, Map<Integer, String> externalAddresses) throws IOException {
-
-        Map<String, CertAndKey> certs = new HashMap<>();
-
-        // copying the minimum number of certificates already existing in the secret
-        // scale up -> it will copy all certificates
-        // scale down -> it will copy just the requested number of replicas
-        for (int i = 0; i < Math.min(replicasInSecret, replicas); i++) {
-            log.debug("{} already exists", podName.apply(cluster, i));
-            certs.put(
-                    podName.apply(cluster, i),
-                    new CertAndKey(
-                            decodeFromSecret(secret, podName.apply(cluster, i) + ".key"),
-                            decodeFromSecret(secret, podName.apply(cluster, i) + ".crt")));
-        }
-
-        File brokerCsrFile = File.createTempFile("tls", "broker-csr");
-        File brokerKeyFile = File.createTempFile("tls", "broker-key");
-        File brokerCertFile = File.createTempFile("tls", "broker-cert");
-
-        // generate the missing number of certificates
-        // scale up -> generate new certificates for added replicas
-        // scale down -> does nothing
-        for (int i = replicasInSecret; i < replicas; i++) {
-            log.debug("{} to generate", podName.apply(cluster, i));
-
-            Subject sbj = new Subject();
-            sbj.setOrganizationName("io.strimzi");
-            sbj.setCommonName(getName());
-
-            Map<String, String> sbjAltNames = new HashMap<>();
-            sbjAltNames.put("DNS.1", getServiceName());
-            sbjAltNames.put("DNS.2", String.format("%s.%s", getServiceName(), namespace));
-            sbjAltNames.put("DNS.3", String.format("%s.%s.svc.%s", getServiceName(), namespace, KUBERNETES_SERVICE_DNS_DOMAIN));
-            sbjAltNames.put("DNS.4", String.format("%s.%s.%s.svc.%s", podName.apply(cluster, i), getHeadlessServiceName(), namespace, KUBERNETES_SERVICE_DNS_DOMAIN));
-
-            int nextDnsId = 5;
-
-            if (externalBootstrapAddress != null)   {
-                sbjAltNames.put("DNS." + nextDnsId, externalBootstrapAddress);
-                nextDnsId++;
-            }
-
-            if (externalAddresses.get(i) != null)   {
-                sbjAltNames.put("DNS." + nextDnsId, externalAddresses.get(i));
-                nextDnsId++;
-            }
-
-            sbj.setSubjectAltNames(sbjAltNames);
-
-            certManager.generateCsr(brokerKeyFile, brokerCsrFile, sbj);
-            certManager.generateCert(brokerCsrFile, caCert.key(), caCert.cert(), brokerCertFile, sbj, CERTS_EXPIRATION_DAYS);
-
-            certs.put(podName.apply(cluster, i),
-                    new CertAndKey(Files.readAllBytes(brokerKeyFile.toPath()), Files.readAllBytes(brokerCertFile.toPath())));
-        }
-
-        if (!brokerCsrFile.delete()) {
-            log.warn("{} cannot be deleted", brokerCsrFile.getName());
-        }
-        if (!brokerKeyFile.delete()) {
-            log.warn("{} cannot be deleted", brokerKeyFile.getName());
-        }
-        if (!brokerCertFile.delete()) {
-            log.warn("{} cannot be deleted", brokerCertFile.getName());
-        }
-
-        return certs;
     }
 
     /**
@@ -1186,6 +1078,10 @@ public abstract class AbstractModel {
     }
 
     public static String getClusterCaName(String cluster)  {
+        return cluster + "-cluster-ca-cert";
+    }
+
+    public static String getClusterCaKeyName(String cluster)  {
         return cluster + "-cluster-ca";
     }
 }

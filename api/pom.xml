@@ -4,7 +4,7 @@
     <parent>
         <groupId>io.strimzi</groupId>
         <artifactId>strimzi</artifactId>
-        <version>0.8.0-SNAPSHOT</version>
+        <version>0.9.0-SNAPSHOT</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
     <artifactId>api</artifactId>
@@ -15,6 +15,17 @@
             <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
         </license>
     </licenses>
+
+    <distributionManagement>
+        <snapshotRepository>
+            <id>ossrh</id>
+            <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+        </snapshotRepository>
+        <repository>
+            <id>ossrh</id>
+            <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
+        </repository>
+    </distributionManagement>
 
     <properties>
         <sundrio.version>0.7.1</sundrio.version>
@@ -92,6 +103,19 @@
         </dependency>
     </dependencies>
 
+    <profiles>
+        <profile>
+            <id>ossrh</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <properties>
+                <gpg.executable>${env.GPG_EXECUTABLE}</gpg.executable>
+                <gpg.passphrase>${env.GPG_PASSPHRASE}</gpg.passphrase>
+            </properties>
+        </profile>
+    </profiles>
+
     <build>
         <plugins>
             <plugin>
@@ -122,6 +146,7 @@
                                 <argument>io.strimzi.api.kafka.model.KafkaConnectS2I=${pom.basedir}${file.separator}..${file.separator}helm-charts${file.separator}strimzi-kafka-operator${file.separator}templates${file.separator}042-Crd-kafkaconnects2i.yaml</argument>
                                 <argument>io.strimzi.api.kafka.model.KafkaTopic=${pom.basedir}${file.separator}..${file.separator}helm-charts${file.separator}strimzi-kafka-operator${file.separator}templates${file.separator}043-Crd-kafkatopic.yaml</argument>
                                 <argument>io.strimzi.api.kafka.model.KafkaUser=${pom.basedir}${file.separator}..${file.separator}helm-charts${file.separator}strimzi-kafka-operator${file.separator}templates${file.separator}044-Crd-kafkauser.yaml</argument>
+                                <argument>io.strimzi.api.kafka.model.KafkaMirrorMaker=${pom.basedir}${file.separator}..${file.separator}helm-charts${file.separator}strimzi-kafka-operator${file.separator}templates${file.separator}045-Crd-kafkamirrormaker.yaml</argument>
                             </arguments>
                         </configuration>
                     </execution>
@@ -139,11 +164,13 @@
                                 <argument>io.strimzi.crdgenerator.CrdGenerator</argument>
                                 <argument>--label</argument><argument>app:strimzi</argument>
                                 <argument>--yaml</argument>
-                                <argument>io.strimzi.api.kafka.model.Kafka=${pom.basedir}${file.separator}..${file.separator}examples${file.separator}install${file.separator}cluster-operator${file.separator}040-Crd-kafka.yaml</argument>
-                                <argument>io.strimzi.api.kafka.model.KafkaConnect=${pom.basedir}${file.separator}..${file.separator}examples${file.separator}install${file.separator}cluster-operator${file.separator}041-Crd-kafkaconnect.yaml</argument>
-                                <argument>io.strimzi.api.kafka.model.KafkaConnectS2I=${pom.basedir}${file.separator}..${file.separator}examples${file.separator}install${file.separator}cluster-operator${file.separator}042-Crd-kafkaconnects2i.yaml</argument>
-                                <argument>io.strimzi.api.kafka.model.KafkaTopic=${pom.basedir}${file.separator}..${file.separator}examples${file.separator}install${file.separator}cluster-operator${file.separator}043-Crd-kafkatopic.yaml</argument>
-                                <argument>io.strimzi.api.kafka.model.KafkaUser=${pom.basedir}${file.separator}..${file.separator}examples${file.separator}install${file.separator}cluster-operator${file.separator}044-Crd-kafkauser.yaml</argument>
+                                <argument>io.strimzi.api.kafka.model.Kafka=${pom.basedir}${file.separator}..${file.separator}install${file.separator}cluster-operator${file.separator}040-Crd-kafka.yaml</argument>
+                                <argument>io.strimzi.api.kafka.model.KafkaConnect=${pom.basedir}${file.separator}..${file.separator}install${file.separator}cluster-operator${file.separator}041-Crd-kafkaconnect.yaml</argument>
+                                <argument>io.strimzi.api.kafka.model.KafkaConnectS2I=${pom.basedir}${file.separator}..${file.separator}install${file.separator}cluster-operator${file.separator}042-Crd-kafkaconnects2i.yaml</argument>
+                                <argument>io.strimzi.api.kafka.model.KafkaTopic=${pom.basedir}${file.separator}..${file.separator}install${file.separator}cluster-operator${file.separator}043-Crd-kafkatopic.yaml</argument>
+                                <argument>io.strimzi.api.kafka.model.KafkaUser=${pom.basedir}${file.separator}..${file.separator}install${file.separator}cluster-operator${file.separator}044-Crd-kafkauser.yaml</argument>
+                                <argument>io.strimzi.api.kafka.model.KafkaMirrorMaker=${pom.basedir}${file.separator}..${file.separator}install${file.separator}cluster-operator${file.separator}045-Crd-kafkamirrormaker.yaml</argument>
+
                             </arguments>
                         </configuration>
                     </execution>
@@ -161,8 +188,8 @@
                                 <argument>io.strimzi.crdgenerator.CrdGenerator</argument>
                                 <argument>--label</argument><argument>app:strimzi</argument>
                                 <argument>--yaml</argument>
-                                <argument>io.strimzi.api.kafka.model.KafkaTopic=${pom.basedir}${file.separator}..${file.separator}examples${file.separator}install${file.separator}topic-operator${file.separator}04-Crd-kafkatopic.yaml</argument>
-                                <argument>io.strimzi.api.kafka.model.KafkaUser=${pom.basedir}${file.separator}..${file.separator}examples${file.separator}install${file.separator}user-operator${file.separator}04-Crd-kafkauser.yaml</argument>
+                                <argument>io.strimzi.api.kafka.model.KafkaTopic=${pom.basedir}${file.separator}..${file.separator}install${file.separator}topic-operator${file.separator}04-Crd-kafkatopic.yaml</argument>
+                                <argument>io.strimzi.api.kafka.model.KafkaUser=${pom.basedir}${file.separator}..${file.separator}install${file.separator}user-operator${file.separator}04-Crd-kafkauser.yaml</argument>
                             </arguments>
                         </configuration>
                     </execution>
@@ -187,6 +214,7 @@
                                 <argument>io.strimzi.api.kafka.model.KafkaConnectS2I</argument>
                                 <argument>io.strimzi.api.kafka.model.KafkaTopic</argument>
                                 <argument>io.strimzi.api.kafka.model.KafkaUser</argument>
+                                <argument>io.strimzi.api.kafka.model.KafkaMirrorMaker</argument>
                             </arguments>
                             <workingDirectory>${pom.basedir}${file.separator}..${file.separator}documentation${file.separator}book</workingDirectory>
                         </configuration>
@@ -201,6 +229,55 @@
                     <execution>
                         <goals>
                             <goal>test-jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-gpg-plugin</artifactId>
+                <version>1.6</version>
+                <executions>
+                    <execution>
+                        <id>sign-artifacts</id>
+                        <phase>deploy</phase>
+                        <goals>
+                            <goal>sign</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.sonatype.plugins</groupId>
+                <artifactId>nexus-staging-maven-plugin</artifactId>
+                <version>1.6.3</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <serverId>ossrh</serverId>
+                    <nexusUrl>https://oss.sonatype.org/</nexusUrl>
+                    <autoReleaseAfterClose>false</autoReleaseAfterClose>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <goals>
+                            <goal>jar</goal>
                         </goals>
                     </execution>
                 </executions>

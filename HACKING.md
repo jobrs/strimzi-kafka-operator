@@ -28,10 +28,16 @@ To build this project you must first install several command line utilities.
 - [`helm`](https://helm.sh/) - Helm Package Management System for Kubernetes
     - After installing Helm be sure to run `helm init`.
 - [`asciidoctor`](https://asciidoctor.org/) - Documentation generation (use `gem` to install latest version for your platform)
-- [`yq`](https://github.com/mikefarah/yq) - YAML manipulation tool
+- [`yq`](https://github.com/mikefarah/yq) - YAML manipulation tool.  **Warning: There are several different `yq` yaml projects in the wild.  [Use this one.](https://github.com/mikefarah/yq)** 
 
 In order to use `make` these all need to be available in your `$PATH`.
- 
+
+### Mac OS
+
+The `make` build is using GNU versions of `find` and `sed` utilities and is not compatible with the BSD versions available on Mac OS. 
+When using Mac OS, you have to install the GNU versions of `find` and `sed`.
+When using `brew`, you can do `brew install gnu-sed findutils`.
+This command will install the GNU versions as `gsed` and `gfind` and our `make` build will automatically pick them up and use them.   
 
 ## Docker images
 
@@ -101,23 +107,23 @@ you can push the images to OpenShift's Docker repo like this:
 
         DOCKER_REGISTRY=172.30.1.1:5000 DOCKER_ORG=`oc project -q` make all
         
-4. In order to use the built images, you need to update the `examples/install/cluster-operator/050-Deployment-strimzi-cluster-operator.yml` to obtain the images from the registry at `172.30.1.1:5000`, rather than from DockerHub.
+4. In order to use the built images, you need to update the `install/cluster-operator/050-Deployment-strimzi-cluster-operator.yml` to obtain the images from the registry at `172.30.1.1:5000`, rather than from DockerHub.
   That can be done using the following command:
 
     ```
     sed -Ei 's#(image|value): strimzi/([a-z0-9-]+):latest#\1: 172.30.1.1:5000/myproject/\2:latest#' \
-      examples/install/cluster-operator/050-Deployment-strimzi-cluster-operator.yaml 
+      install/cluster-operator/050-Deployment-strimzi-cluster-operator.yaml 
     ```
 
     This will update `050-Deployment-strimzi-cluster-operator.yaml` replacing all the image references (in `image` and `value` properties) with ones with the same name from `172.30.1.1:5000/myproject`.
 
 5. Then you can deploy the Cluster Operator running:
 
-    oc create -f examples/install/cluster-operator
+    oc create -f install/cluster-operator
 
-6. Finally, you can deploy the cluster ConfigMap running:
+6. Finally, you can deploy the cluster custom resource running:
 
-    oc create -f examples/configmaps/cluster-operator/kafka-ephemeral.yaml
+    oc create -f examples/kafka/kafka-ephemeral.yaml
 
 ## Helm Chart
 
@@ -151,7 +157,7 @@ The release process should normally look like this:
 6. Create the tag and push it to GitHub. Tag name determines the tag of the resulting Docker images. Therefore the Git 
 tag name has to be the same as the `RELEASE_VERSION`,
 7. Once the CI build for the tag is finished and the Docker images are pushed to Docker Hub, Create a GitHub release and tag based on the release branch. 
-Attach the TAR.GZ/ZIP archives and the Helm Chart to the release
+Attach the TAR.GZ/ZIP archives, YAML files (for installation from URL) and the Helm Chart to the release
 8. On the `master` git branch
   * Update the versions to the next SNAPSHOT version using the `next_version` `make` target. 
   For example to update the next version to `0.6.0-SNAPSHOT` run: `make NEXT_VERSION=0.6.0-SNAPSHOT next_version`.
@@ -185,11 +191,11 @@ Pass additional parameters to `mvn` by populating the `EXTRA_ARGS` env var.
     
 ### Running single test class
 
-Use the `test` build goal and provide a `-Dtest=TestClassName` system property.
+Use the `test` build goal and provide a `-Dtest=TestClassName[#testMethodName]` system property. 
 
 Ex)
 
-    mvn test -pl systemtest -Djava.net.preferIPv4Stack=true -DtrimStackTrace=false -Djunitgroup=acceptance,regression -Dtest=KafkaClusterIT
+    mvn test -pl systemtest -Djava.net.preferIPv4Stack=true -DtrimStackTrace=false -Djunitgroup=acceptance,regression -Dtest=KafkaST#testKafkaAndZookeeperScaleUpScaleDown
 
 
 ### Log level

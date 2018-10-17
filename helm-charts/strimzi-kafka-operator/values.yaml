@@ -1,5 +1,7 @@
 # Default values for strimzi-kafka-operator.
 
+watchNamespaces: []
+
 image:
   repository: strimzi
   name: cluster-operator
@@ -60,6 +62,11 @@ tlsSidecarEntityOperator:
   image:
     repository: strimzi
     name: entity-operator-stunnel
+    tag: latest
+kafkaMirrorMaker:
+  image:
+    repository: strimzi
+    name: kafka-mirror-maker
     tag: latest
 resources:
   limits:

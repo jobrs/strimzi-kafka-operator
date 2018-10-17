@@ -29,23 +29,20 @@ import io.strimzi.api.kafka.model.Kafka;
 import io.strimzi.api.kafka.model.Logging;
 import io.strimzi.api.kafka.model.PersistentClaimStorage;
 import io.strimzi.api.kafka.model.Resources;
-import io.strimzi.api.kafka.model.Sidecar;
+import io.strimzi.api.kafka.model.TlsSidecar;
+import io.strimzi.api.kafka.model.TlsSidecarLogLevel;
 import io.strimzi.api.kafka.model.ZookeeperClusterSpec;
 import io.strimzi.certs.CertAndKey;
-import io.strimzi.certs.CertManager;
 import io.strimzi.operator.common.model.Labels;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static io.strimzi.operator.cluster.model.ModelUtils.findSecretWithName;
 import static java.util.Arrays.asList;
-import static java.util.Collections.singletonList;
 
 public class ZookeeperCluster extends AbstractModel {
 
@@ -58,8 +55,10 @@ public class ZookeeperCluster extends AbstractModel {
 
     protected static final String ZOOKEEPER_NAME = "zookeeper";
     protected static final String TLS_SIDECAR_NAME = "tls-sidecar";
-    protected static final String TLS_SIDECAR_VOLUME_NAME = "tls-sidecar-certs";
-    protected static final String TLS_SIDECAR_VOLUME_MOUNT = "/etc/tls-sidecar/certs/";
+    protected static final String TLS_SIDECAR_NODES_VOLUME_NAME = "zookeeper-nodes";
+    protected static final String TLS_SIDECAR_NODES_VOLUME_MOUNT = "/etc/tls-sidecar/zookeeper-nodes/";
+    protected static final String TLS_SIDECAR_CLUSTER_CA_VOLUME_NAME = "cluster-ca-certs";
+    protected static final String TLS_SIDECAR_CLUSTER_CA_VOLUME_MOUNT = "/etc/tls-sidecar/cluster-ca-certs/";
     private static final String NAME_SUFFIX = "-zookeeper";
     private static final String SERVICE_NAME_SUFFIX = NAME_SUFFIX + "-client";
     private static final String HEADLESS_SERVICE_NAME_SUFFIX = NAME_SUFFIX + "-nodes";
@@ -68,7 +67,7 @@ public class ZookeeperCluster extends AbstractModel {
     private static final String NODES_CERTS_SUFFIX = NAME_SUFFIX + "-nodes";
 
     // Zookeeper configuration
-    private Sidecar tlsSidecar;
+    private TlsSidecar tlsSidecar;
 
     // Configuration defaults
     private static final int DEFAULT_HEALTHCHECK_DELAY = 15;
@@ -80,12 +79,7 @@ public class ZookeeperCluster extends AbstractModel {
     public static final String ENV_VAR_ZOOKEEPER_METRICS_ENABLED = "ZOOKEEPER_METRICS_ENABLED";
     public static final String ENV_VAR_ZOOKEEPER_CONFIGURATION = "ZOOKEEPER_CONFIGURATION";
     public static final String ENV_VAR_ZOOKEEPER_LOG_CONFIGURATION = "ZOOKEEPER_LOG_CONFIGURATION";
-
-    /**
-     * Private key and certificate for each Zookeeper Pod name
-     * used for for encrypting the communication in the Zookeeper ensemble
-     */
-    private Map<String, CertAndKey> certs;
+    public static final String ENV_VAR_TLS_SIDECAR_LOG_LEVEL = "TLS_SIDECAR_LOG_LEVEL";
 
     public static String zookeeperClusterName(String cluster) {
         return cluster + ZookeeperCluster.NAME_SUFFIX;
@@ -124,6 +118,7 @@ public class ZookeeperCluster extends AbstractModel {
      *
      * @param namespace Kubernetes/OpenShift namespace where Zookeeper cluster resources are going to be created
      * @param cluster   overall cluster name
+     * @param labels    labels to add to the cluster
      */
     private ZookeeperCluster(String namespace, String cluster, Labels labels) {
 
@@ -149,7 +144,7 @@ public class ZookeeperCluster extends AbstractModel {
         this.validLoggerFields = getDefaultLogConfig();
     }
 
-    public static ZookeeperCluster fromCrd(CertManager certManager, Kafka kafkaAssembly, List<Secret> secrets) {
+    public static ZookeeperCluster fromCrd(Kafka kafkaAssembly) {
         ZookeeperCluster zk = new ZookeeperCluster(kafkaAssembly.getMetadata().getNamespace(), kafkaAssembly.getMetadata().getName(),
                 Labels.fromResource(kafkaAssembly).withKind(kafkaAssembly.getKind()));
         zk.setOwnerReference(kafkaAssembly);
@@ -185,44 +180,8 @@ public class ZookeeperCluster extends AbstractModel {
         zk.setJvmOptions(zookeeperClusterSpec.getJvmOptions());
         zk.setUserAffinity(zookeeperClusterSpec.getAffinity());
         zk.setTolerations(zookeeperClusterSpec.getTolerations());
-        zk.generateCertificates(certManager, secrets);
         zk.setTlsSidecar(zookeeperClusterSpec.getTlsSidecar());
         return zk;
-    }
-
-    /**
-     * Manage certificates generation based on those already present in the Secrets
-     *
-     * @param certManager CertManager instance for handling certificates creation
-     * @param secrets The Secrets storing certificates
-     */
-    public void generateCertificates(CertManager certManager, List<Secret> secrets) {
-        log.debug("Generating certificates");
-
-        try {
-            Secret internalCaSecret = findSecretWithName(secrets, getClusterCaName(cluster));
-            if (internalCaSecret != null) {
-
-                // get the generated CA private key + self-signed certificate for internal communications
-                clusterCA = new CertAndKey(
-                        decodeFromSecret(internalCaSecret, "cluster-ca.key"),
-                        decodeFromSecret(internalCaSecret, "cluster-ca.crt"));
-
-                // recover or generates the private key + certificate for each node
-                Secret nodesSecret = findSecretWithName(secrets, ZookeeperCluster.nodesSecretName(cluster));
-
-                int replicasSecret = nodesSecret == null ? 0 : (nodesSecret.getData().size() - 1) / 2;
-
-                log.debug("Cluster communication certificates");
-                certs = maybeCopyOrGenerateCerts(certManager, nodesSecret, replicasSecret, clusterCA, ZookeeperCluster::zookeeperPodName);
-            } else {
-                throw new NoCertificateSecretException("The cluster CA certificate Secret is missing");
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-
-        log.debug("End generating certificates");
     }
 
     public Service generateService() {
@@ -240,6 +199,8 @@ public class ZookeeperCluster extends AbstractModel {
     }
 
     public NetworkPolicy generateNetworkPolicy() {
+        List<NetworkPolicyIngressRule> rules = new ArrayList<>(2);
+
         NetworkPolicyPort port1 = new NetworkPolicyPort();
         port1.setPort(new IntOrString(CLIENT_PORT));
 
@@ -275,6 +236,20 @@ public class ZookeeperCluster extends AbstractModel {
                 .withFrom(kafkaClusterPeer, zookeeperClusterPeer, entityOperatorPeer)
                 .build();
 
+        rules.add(networkPolicyIngressRule);
+
+        if (isMetricsEnabled) {
+            NetworkPolicyPort metricsPort = new NetworkPolicyPort();
+            metricsPort.setPort(new IntOrString(METRICS_PORT));
+
+            NetworkPolicyIngressRule metricsRule = new NetworkPolicyIngressRuleBuilder()
+                    .withPorts(metricsPort)
+                    .withFrom()
+                    .build();
+
+            rules.add(metricsRule);
+        }
+
         NetworkPolicy networkPolicy = new NetworkPolicyBuilder()
                 .withNewMetadata()
                     .withName(policyName(cluster))
@@ -284,7 +259,7 @@ public class ZookeeperCluster extends AbstractModel {
                 .endMetadata()
                 .withNewSpec()
                     .withPodSelector(labelSelector2)
-                    .withIngress(networkPolicyIngressRule)
+                    .withIngress(rules)
                 .endSpec()
                 .build();
 
@@ -300,7 +275,7 @@ public class ZookeeperCluster extends AbstractModel {
     public StatefulSet generateStatefulSet(boolean isOpenShift) {
 
         return createStatefulSet(
-                getVolumes(),
+                getVolumes(isOpenShift),
                 getVolumeClaims(),
                 getVolumeMounts(),
                 getMergedAffinity(),
@@ -315,17 +290,26 @@ public class ZookeeperCluster extends AbstractModel {
      * internally within the cluster
      * @return The generated Secret
      */
-    public Secret generateNodesSecret() {
-        Base64.Encoder encoder = Base64.getEncoder();
+    public Secret generateNodesSecret(ClusterCa clusterCa, Kafka kafka) {
 
         Map<String, String> data = new HashMap<>();
-        data.put("cluster-ca.crt", encoder.encodeToString(clusterCA.cert()));
 
-        for (int i = 0; i < replicas; i++) {
-            CertAndKey cert = certs.get(ZookeeperCluster.zookeeperPodName(cluster, i));
-            data.put(ZookeeperCluster.zookeeperPodName(cluster, i) + ".key", encoder.encodeToString(cert.key()));
-            data.put(ZookeeperCluster.zookeeperPodName(cluster, i) + ".crt", encoder.encodeToString(cert.cert()));
+        log.debug("Generating certificates");
+        Map<String, CertAndKey> certs;
+        try {
+            log.debug("Cluster communication certificates");
+            certs = clusterCa.generateZkCerts(kafka);
+            log.debug("End generating certificates");
+            for (int i = 0; i < replicas; i++) {
+                CertAndKey cert = certs.get(ZookeeperCluster.zookeeperPodName(cluster, i));
+                data.put(ZookeeperCluster.zookeeperPodName(cluster, i) + ".key", cert.keyAsBase64String());
+                data.put(ZookeeperCluster.zookeeperPodName(cluster, i) + ".crt", cert.certAsBase64String());
+            }
+
+        } catch (IOException e) {
+            log.warn("Error while generating certificates", e);
         }
+
         return createSecret(ZookeeperCluster.nodesSecretName(cluster), data);
     }
 
@@ -350,12 +334,16 @@ public class ZookeeperCluster extends AbstractModel {
 
         Resources tlsSidecarResources = (tlsSidecar != null) ? tlsSidecar.getResources() : null;
 
+        TlsSidecarLogLevel tlsSidecarLogLevel = (tlsSidecar != null) ? tlsSidecar.getLogLevel() : TlsSidecarLogLevel.NOTICE;
+
         Container tlsSidecarContainer = new ContainerBuilder()
                 .withName(TLS_SIDECAR_NAME)
                 .withImage(tlsSidecarImage)
                 .withResources(resources(tlsSidecarResources))
-                .withEnv(singletonList(buildEnvVar(ENV_VAR_ZOOKEEPER_NODE_COUNT, Integer.toString(replicas))))
-                .withVolumeMounts(createVolumeMount(TLS_SIDECAR_VOLUME_NAME, TLS_SIDECAR_VOLUME_MOUNT))
+                .withEnv(asList(buildEnvVar(ENV_VAR_TLS_SIDECAR_LOG_LEVEL, tlsSidecarLogLevel.toValue()),
+                        buildEnvVar(ENV_VAR_ZOOKEEPER_NODE_COUNT, Integer.toString(replicas))))
+                .withVolumeMounts(createVolumeMount(TLS_SIDECAR_NODES_VOLUME_NAME, TLS_SIDECAR_NODES_VOLUME_MOUNT),
+                        createVolumeMount(TLS_SIDECAR_CLUSTER_CA_VOLUME_NAME, TLS_SIDECAR_CLUSTER_CA_VOLUME_MOUNT))
                 .withPorts(asList(createContainerPort(CLUSTERING_PORT_NAME, CLUSTERING_PORT, "TCP"),
                                 createContainerPort(LEADER_ELECTION_PORT_NAME, LEADER_ELECTION_PORT, "TCP"),
                                 createContainerPort(CLIENT_PORT_NAME, CLIENT_PORT, "TCP")))
@@ -396,13 +384,14 @@ public class ZookeeperCluster extends AbstractModel {
         return portList;
     }
 
-    private List<Volume> getVolumes() {
+    private List<Volume> getVolumes(boolean isOpenShift) {
         List<Volume> volumeList = new ArrayList<>();
         if (storage instanceof EphemeralStorage) {
             volumeList.add(createEmptyDirVolume(VOLUME_NAME));
         }
         volumeList.add(createConfigMapVolume(logAndMetricsConfigVolumeName, ancillaryConfigName));
-        volumeList.add(createSecretVolume(TLS_SIDECAR_VOLUME_NAME, ZookeeperCluster.nodesSecretName(cluster)));
+        volumeList.add(createSecretVolume(TLS_SIDECAR_NODES_VOLUME_NAME, ZookeeperCluster.nodesSecretName(cluster), isOpenShift));
+        volumeList.add(createSecretVolume(TLS_SIDECAR_CLUSTER_CA_VOLUME_NAME, AbstractModel.getClusterCaName(cluster), isOpenShift));
         return volumeList;
     }
 
@@ -422,7 +411,7 @@ public class ZookeeperCluster extends AbstractModel {
         return volumeMountList;
     }
 
-    protected void setTlsSidecar(Sidecar tlsSidecar) {
+    protected void setTlsSidecar(TlsSidecar tlsSidecar) {
         this.tlsSidecar = tlsSidecar;
     }
 

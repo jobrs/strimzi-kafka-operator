@@ -20,6 +20,8 @@ import io.strimzi.operator.common.model.ResourceType;
 import io.strimzi.operator.common.operator.resource.CrdOperator;
 import io.strimzi.operator.common.operator.resource.SecretOperator;
 import io.strimzi.operator.user.model.KafkaUserModel;
+import io.strimzi.operator.user.model.acl.SimpleAclRule;
+
 import io.vertx.core.AsyncResult;
 import io.vertx.core.CompositeFuture;
 import io.vertx.core.Future;
@@ -52,7 +54,8 @@ public class KafkaUserOperator {
     private final SecretOperator secretOperations;
     private final SimpleAclOperator aclOperations;
     private final CertManager certManager;
-    private final String caName;
+    private final String caCertName;
+    private final String caKeyName;
     private final String caNamespace;
     private final ScramShaCredentialsOperator scramShaCredentialOperator;
     private PasswordGenerator passwordGenerator = new PasswordGenerator(12,
@@ -67,7 +70,7 @@ public class KafkaUserOperator {
      * @param secretOperations For operating on Secrets
      * @param scramShaCredentialOperator For operating on SCRAM SHA credentials
      * @param aclOperations For operating on ACLs
-     * @param caName The name of the Secret containing the clients CA certificate and private key
+     * @param caCertName The name of the Secret containing the clients CA certificate and private key
      * @param caNamespace The namespace of the Secret containing the clients CA certificate and private key
      */
     public KafkaUserOperator(Vertx vertx,
@@ -75,14 +78,15 @@ public class KafkaUserOperator {
                              CrdOperator<KubernetesClient, KafkaUser, KafkaUserList, DoneableKafkaUser> crdOperator,
                              SecretOperator secretOperations,
                              ScramShaCredentialsOperator scramShaCredentialOperator,
-                             SimpleAclOperator aclOperations, String caName, String caNamespace) {
+                             SimpleAclOperator aclOperations, String caCertName, String caKeyName, String caNamespace) {
         this.vertx = vertx;
         this.certManager = certManager;
         this.secretOperations = secretOperations;
         this.scramShaCredentialOperator = scramShaCredentialOperator;
         this.crdOperator = crdOperator;
         this.aclOperations = aclOperations;
-        this.caName = caName;
+        this.caCertName = caCertName;
+        this.caKeyName = caKeyName;
         this.caNamespace = caNamespace;
     }
 
@@ -103,22 +107,23 @@ public class KafkaUserOperator {
      * one resource means that all resources need to be created).
      * @param reconciliation Unique identification for the reconciliation
      * @param kafkaUser KafkaUser resources with the desired user configuration.
-     * @param clientsCa Secret with the Clients CA
+     * @param clientsCaCert Secret with the Clients CA cert
+     * @param clientsCaCert Secret with the Clients CA key
      * @param userSecret User secret (if it exists, null otherwise)
      * @param handler Completion handler
      */
-    protected void createOrUpdate(Reconciliation reconciliation, KafkaUser kafkaUser, Secret clientsCa, Secret userSecret, Handler<AsyncResult<Void>> handler) {
+    protected void createOrUpdate(Reconciliation reconciliation, KafkaUser kafkaUser, Secret clientsCaCert, Secret clientsCaKey, Secret userSecret, Handler<AsyncResult<Void>> handler) {
         String namespace = reconciliation.namespace();
         String userName = reconciliation.name();
         KafkaUserModel user;
         try {
-            user = KafkaUserModel.fromCrd(certManager, passwordGenerator, kafkaUser, clientsCa, userSecret);
+            user = KafkaUserModel.fromCrd(certManager, passwordGenerator, kafkaUser, clientsCaCert, clientsCaKey, userSecret);
         } catch (Exception e) {
             handler.handle(Future.failedFuture(e));
             return;
         }
 
-        log.debug("{}: Updating User", reconciliation, userName, namespace);
+        log.debug("{}: Updating User {} in namespace {}", reconciliation, userName, namespace);
         Secret desired = user.generateSecret();
         String password = null;
 
@@ -126,10 +131,20 @@ public class KafkaUserOperator {
             password = new String(Base64.getDecoder().decode(desired.getData().get("password")), Charset.forName("US-ASCII"));
         }
 
+        Set<SimpleAclRule> tlsAcls = null;
+        Set<SimpleAclRule> scramAcls = null;
+
+        if (user.isTlsUser())   {
+            tlsAcls = user.getSimpleAclRules();
+        } else if (user.isScramUser())  {
+            scramAcls = user.getSimpleAclRules();
+        }
+
         CompositeFuture.join(
                 scramShaCredentialOperator.reconcile(user.getName(), password),
                 secretOperations.reconcile(namespace, user.getSecretName(), desired),
-                aclOperations.reconcile(user.getUserName(), user.getSimpleAclRules()))
+                aclOperations.reconcile(KafkaUserModel.getTlsUserName(userName), tlsAcls),
+                aclOperations.reconcile(KafkaUserModel.getScramUserName(userName), scramAcls))
                 .map((Void) null).setHandler(handler);
     }
 
@@ -143,8 +158,9 @@ public class KafkaUserOperator {
         String user = reconciliation.name();
         log.debug("{}: Deleting User", reconciliation, user, namespace);
         CompositeFuture.join(secretOperations.reconcile(namespace, KafkaUserModel.getSecretName(user), null),
-                aclOperations.reconcile(KafkaUserModel.getUserName(user), null),
-                scramShaCredentialOperator.reconcile(KafkaUserModel.getUserName(user), null))
+                aclOperations.reconcile(KafkaUserModel.getTlsUserName(user), null),
+                aclOperations.reconcile(KafkaUserModel.getScramUserName(user), null),
+                scramShaCredentialOperator.reconcile(KafkaUserModel.getScramUserName(user), null))
             .map((Void) null).setHandler(handler);
     }
 
@@ -167,10 +183,11 @@ public class KafkaUserOperator {
 
                     if (cr != null) {
                         log.info("{}: User {} should be created or updated", reconciliation, name);
-                        Secret clientsCa = secretOperations.get(caNamespace, caName);
+                        Secret clientsCaCert = secretOperations.get(caNamespace, caCertName);
+                        Secret clientsCaKey = secretOperations.get(caNamespace, caKeyName);
                         Secret userSecret = secretOperations.get(namespace, KafkaUserModel.getSecretName(name));
 
-                        createOrUpdate(reconciliation, cr, clientsCa, userSecret, createResult -> {
+                        createOrUpdate(reconciliation, cr, clientsCaCert, clientsCaKey, userSecret, createResult -> {
                             lock.release();
                             log.debug("{}: Lock {} released", reconciliation, lockName);
                             if (createResult.failed()) {
@@ -197,6 +214,7 @@ public class KafkaUserOperator {
                     }
                 } catch (Throwable ex) {
                     lock.release();
+                    log.error("{}: Reconciliation failed", reconciliation, ex);
                     log.debug("{}: Lock {} released", reconciliation, lockName);
                     handler.handle(Future.failedFuture(ex));
                 }

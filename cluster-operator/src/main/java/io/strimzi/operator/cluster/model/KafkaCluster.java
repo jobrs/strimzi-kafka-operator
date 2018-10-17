@@ -32,7 +32,6 @@ import io.fabric8.kubernetes.api.model.extensions.NetworkPolicyPort;
 import io.fabric8.kubernetes.api.model.extensions.StatefulSet;
 import io.fabric8.openshift.api.model.Route;
 import io.fabric8.openshift.api.model.RouteBuilder;
-
 import io.strimzi.api.kafka.model.EphemeralStorage;
 import io.strimzi.api.kafka.model.InlineLogging;
 import io.strimzi.api.kafka.model.Kafka;
@@ -48,18 +47,14 @@ import io.strimzi.api.kafka.model.Logging;
 import io.strimzi.api.kafka.model.PersistentClaimStorage;
 import io.strimzi.api.kafka.model.Rack;
 import io.strimzi.api.kafka.model.Resources;
-import io.strimzi.api.kafka.model.Sidecar;
+import io.strimzi.api.kafka.model.TlsSidecar;
+import io.strimzi.api.kafka.model.TlsSidecarLogLevel;
 import io.strimzi.certs.CertAndKey;
-import io.strimzi.certs.CertManager;
-import io.strimzi.certs.Subject;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.operator.resource.ClusterRoleBindingOperator;
 
-import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -68,8 +63,7 @@ import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 
-import static io.strimzi.operator.cluster.model.ModelUtils.findSecretWithName;
-import static java.util.Collections.singletonList;
+import static java.util.Arrays.asList;
 
 public class KafkaCluster extends AbstractModel {
 
@@ -90,11 +84,13 @@ public class KafkaCluster extends AbstractModel {
     protected static final String ENV_VAR_KAFKA_EXTERNAL_ENABLED = "KAFKA_EXTERNAL_ENABLED";
     protected static final String ENV_VAR_KAFKA_EXTERNAL_ADDRESSES = "KAFKA_EXTERNAL_ADDRESSES";
     protected static final String ENV_VAR_KAFKA_EXTERNAL_AUTHENTICATION = "KAFKA_EXTERNAL_AUTHENTICATION";
+    protected static final String ENV_VAR_KAFKA_EXTERNAL_TLS = "KAFKA_EXTERNAL_TLS";
     private static final String ENV_VAR_KAFKA_AUTHORIZATION_TYPE = "KAFKA_AUTHORIZATION_TYPE";
     private static final String ENV_VAR_KAFKA_AUTHORIZATION_SUPER_USERS = "KAFKA_AUTHORIZATION_SUPER_USERS";
     public static final String ENV_VAR_KAFKA_ZOOKEEPER_CONNECT = "KAFKA_ZOOKEEPER_CONNECT";
     private static final String ENV_VAR_KAFKA_METRICS_ENABLED = "KAFKA_METRICS_ENABLED";
     protected static final String ENV_VAR_KAFKA_CONFIGURATION = "KAFKA_CONFIGURATION";
+    public static final String ENV_VAR_TLS_SIDECAR_LOG_LEVEL = "TLS_SIDECAR_LOG_LEVEL";
 
     protected static final int CLIENT_PORT = 9092;
     protected static final String CLIENT_PORT_NAME = "clients";
@@ -109,12 +105,15 @@ public class KafkaCluster extends AbstractModel {
     protected static final String EXTERNAL_PORT_NAME = "external";
 
     protected static final String KAFKA_NAME = "kafka";
+    protected static final String CLUSTER_CA_CERTS_VOLUME = "cluster-ca";
     protected static final String BROKER_CERTS_VOLUME = "broker-certs";
     protected static final String CLIENT_CA_CERTS_VOLUME = "client-ca-cert";
+    protected static final String CLUSTER_CA_CERTS_VOLUME_MOUNT = "/opt/kafka/cluster-ca-certs";
     protected static final String BROKER_CERTS_VOLUME_MOUNT = "/opt/kafka/broker-certs";
-    protected static final String CLIENT_CA_CERTS_VOLUME_MOUNT = "/opt/kafka/client-ca-cert";
+    protected static final String CLIENT_CA_CERTS_VOLUME_MOUNT = "/opt/kafka/client-ca-certs";
     protected static final String TLS_SIDECAR_NAME = "tls-sidecar";
-    protected static final String TLS_SIDECAR_VOLUME_MOUNT = "/etc/tls-sidecar/certs/";
+    protected static final String TLS_SIDECAR_KAFKA_CERTS_VOLUME_MOUNT = "/etc/tls-sidecar/kafka-brokers/";
+    protected static final String TLS_SIDECAR_CLUSTER_CA_CERTS_VOLUME_MOUNT = "/etc/tls-sidecar/cluster-ca-certs/";
 
     private static final String NAME_SUFFIX = "-kafka";
     private static final String SERVICE_NAME_SUFFIX = NAME_SUFFIX + "-bootstrap";
@@ -132,7 +131,7 @@ public class KafkaCluster extends AbstractModel {
     private String zookeeperConnect;
     private Rack rack;
     private String initImage;
-    private Sidecar tlsSidecar;
+    private TlsSidecar tlsSidecar;
     private KafkaListeners listeners;
     private KafkaAuthorization authorization;
     private SortedMap<Integer, String> externalAddresses = new TreeMap<>();
@@ -143,7 +142,6 @@ public class KafkaCluster extends AbstractModel {
     private static final int DEFAULT_HEALTHCHECK_TIMEOUT = 5;
     private static final boolean DEFAULT_KAFKA_METRICS_ENABLED = false;
 
-    private CertAndKey clientsCA;
     /**
      * Private key and certificate for each Kafka Pod name
      * used as server certificates for Kafka brokers
@@ -155,6 +153,7 @@ public class KafkaCluster extends AbstractModel {
      *
      * @param namespace Kubernetes/OpenShift namespace where Kafka cluster resources are going to be created
      * @param cluster  overall cluster name
+     * @param labels    labels to add to the cluster
      */
     private KafkaCluster(String namespace, String cluster, Labels labels) {
         super(namespace, cluster, labels);
@@ -235,7 +234,7 @@ public class KafkaCluster extends AbstractModel {
     }
 
     public static String clusterPublicKeyName(String cluster) {
-        return getClusterCaName(cluster) + KafkaCluster.SECRET_CLUSTER_PUBLIC_KEY_SUFFIX;
+        return getClusterCaName(cluster);
     }
 
     public static KafkaCluster fromCrd(Kafka kafkaAssembly) {
@@ -282,13 +281,19 @@ public class KafkaCluster extends AbstractModel {
         result.setTlsSidecar(kafkaClusterSpec.getTlsSidecar());
 
         KafkaListeners listeners = kafkaClusterSpec.getListeners();
+        result.setListeners(listeners);
+
         if (listeners != null) {
             if (listeners.getPlain() != null
                 && listeners.getPlain().getAuthentication() instanceof KafkaListenerAuthenticationTls) {
                 throw new InvalidResourceException("You cannot configure TLS authentication on a plain listener.");
             }
+
+            if (listeners.getExternal() != null && !result.isExposedWithTls() && listeners.getExternal().getAuth() instanceof KafkaListenerAuthenticationTls)  {
+                throw new InvalidResourceException("TLS Client Authentication can be used only with enabled TLS encryption!");
+            }
         }
-        result.setListeners(listeners);
+
         result.setAuthorization(kafkaClusterSpec.getAuthorization());
 
         return result;
@@ -296,63 +301,17 @@ public class KafkaCluster extends AbstractModel {
 
     /**
      * Manage certificates generation based on those already present in the Secrets
-     *
-     * @param certManager CertManager instance for handling certificates creation
-     * @param secrets The Secrets storing certificates
-     * @param externalBootstrapAddress External address to the bootstrap service
-     * @param externalAddresses Map with external addresses under which the individual pods are available
+     * @param clusterCa The certificates
      */
-    public void generateCertificates(CertManager certManager, List<Secret> secrets, String externalBootstrapAddress, Map<Integer, String> externalAddresses) {
+    public void generateCertificates(Kafka kafka, ClusterCa clusterCa, ClientsCa clientsCa, String externalBootstrapDnsName, Map<Integer, String> externalDnsNames) {
         log.debug("Generating certificates");
 
         try {
-            Secret clusterCaSecret = findSecretWithName(secrets, getClusterCaName(cluster));
-            if (clusterCaSecret != null) {
-                // get the generated CA private key + self-signed certificate for each broker
-                clusterCA = new CertAndKey(
-                        decodeFromSecret(clusterCaSecret, "cluster-ca.key"),
-                        decodeFromSecret(clusterCaSecret, "cluster-ca.crt"));
-
-                // CA private key + self-signed certificate for clients communications
-                Secret clientsCaSecret = findSecretWithName(secrets, KafkaCluster.clientsCASecretName(cluster));
-                if (clientsCaSecret == null) {
-                    log.debug("Clients CA to generate");
-                    File clientsCAkeyFile = File.createTempFile("tls", "clients-ca-key");
-                    File clientsCAcertFile = File.createTempFile("tls", "clients-ca-cert");
-
-                    Subject sbj = new Subject();
-                    sbj.setOrganizationName("io.strimzi");
-                    sbj.setCommonName("kafka-clients-ca");
-
-                    certManager.generateSelfSignedCert(clientsCAkeyFile, clientsCAcertFile, sbj, CERTS_EXPIRATION_DAYS);
-                    clientsCA =
-                            new CertAndKey(Files.readAllBytes(clientsCAkeyFile.toPath()), Files.readAllBytes(clientsCAcertFile.toPath()));
-                    if (!clientsCAkeyFile.delete()) {
-                        log.warn("{} cannot be deleted", clientsCAkeyFile.getName());
-                    }
-                    if (!clientsCAcertFile.delete()) {
-                        log.warn("{} cannot be deleted", clientsCAcertFile.getName());
-                    }
-                } else {
-                    log.debug("Clients CA already exists");
-                    clientsCA = new CertAndKey(
-                            decodeFromSecret(clientsCaSecret, "clients-ca.key"),
-                            decodeFromSecret(clientsCaSecret, "clients-ca.crt"));
-                }
-
-                // recover or generates the private key + certificate for each broker for internal and clients communication
-                Secret clusterSecret = findSecretWithName(secrets, KafkaCluster.brokersSecretName(cluster));
-
-                int replicasInternalSecret = clusterSecret == null ? 0 : (clusterSecret.getData().size() - 1) / 2;
-
-                log.debug("Internal communication certificates");
-                brokerCerts = maybeCopyOrGenerateCerts(certManager, clusterSecret, replicasInternalSecret, clusterCA, KafkaCluster::kafkaPodName, externalBootstrapAddress, externalAddresses);
-            } else {
-                throw new NoCertificateSecretException("The cluster CA certificate Secret is missing");
-            }
-
+            clientsCa.createOrRenew(kafka.getMetadata().getNamespace(), kafka.getMetadata().getName(),
+                    labels.toMap(), createOwnerReference());
+            brokerCerts = clusterCa.generateBrokerCerts(kafka, externalBootstrapDnsName, externalDnsNames);
         } catch (IOException e) {
-            e.printStackTrace();
+            log.warn("Error while generating certificates", e);
         }
 
         log.debug("End generating certificates");
@@ -555,48 +514,13 @@ public class KafkaCluster extends AbstractModel {
      */
     public StatefulSet generateStatefulSet(boolean isOpenShift) {
         return createStatefulSet(
-                getVolumes(),
+                getVolumes(isOpenShift),
                 getVolumeClaims(),
                 getVolumeMounts(),
                 getMergedAffinity(),
                 getInitContainers(),
                 getContainers(),
                 isOpenShift);
-    }
-
-    /**
-     * Generate the Secret containing CA private key and self-signed certificate used
-     * for signing brokers certificates used for communication with clients
-     * @return The generated Secret
-     */
-    public Secret generateClientsCASecret() {
-        Map<String, String> data = new HashMap<>();
-        data.put("clients-ca.key", Base64.getEncoder().encodeToString(clientsCA.key()));
-        data.put("clients-ca.crt", Base64.getEncoder().encodeToString(clientsCA.cert()));
-        return createSecret(KafkaCluster.clientsCASecretName(cluster), data);
-    }
-
-    /**
-     * Generate the Secret containing just the self-signed CA certificate used
-     * for signing client certificates. It is used for the broker truststore.
-     * @return The generated Secret
-     */
-    public Secret generateClientsPublicKeySecret() {
-        Map<String, String> data = new HashMap<>();
-        data.put("ca.crt", Base64.getEncoder().encodeToString(clientsCA.cert()));
-        return createSecret(KafkaCluster.clientsPublicKeyName(cluster), data);
-    }
-
-    /**
-     * Generate the Secret containing just the self-signed CA certificate used
-     * for signing brokers certificates used for communication with clients
-     * It's useful for users to extract the certificate itself to put as trusted on the clients
-     * @return The generated Secret
-     */
-    public Secret generateClusterPublicKeySecret() {
-        Map<String, String> data = new HashMap<>();
-        data.put("ca.crt", Base64.getEncoder().encodeToString(clusterCA.cert()));
-        return createSecret(KafkaCluster.clusterPublicKeyName(cluster), data);
     }
 
     /**
@@ -607,15 +531,12 @@ public class KafkaCluster extends AbstractModel {
      * @return The generated Secret
      */
     public Secret generateBrokersSecret() {
-        Base64.Encoder encoder = Base64.getEncoder();
 
         Map<String, String> data = new HashMap<>();
-        data.put("cluster-ca.crt", encoder.encodeToString(clusterCA.cert()));
-
         for (int i = 0; i < replicas; i++) {
             CertAndKey cert = brokerCerts.get(KafkaCluster.kafkaPodName(cluster, i));
-            data.put(KafkaCluster.kafkaPodName(cluster, i) + ".key", encoder.encodeToString(cert.key()));
-            data.put(KafkaCluster.kafkaPodName(cluster, i) + ".crt", encoder.encodeToString(cert.cert()));
+            data.put(KafkaCluster.kafkaPodName(cluster, i) + ".key", cert.keyAsBase64String());
+            data.put(KafkaCluster.kafkaPodName(cluster, i) + ".crt", cert.certAsBase64String());
         }
         return createSecret(KafkaCluster.brokersSecretName(cluster), data);
     }
@@ -643,7 +564,7 @@ public class KafkaCluster extends AbstractModel {
         return portList;
     }
 
-    private List<Volume> getVolumes() {
+    private List<Volume> getVolumes(boolean isOpenShift) {
         List<Volume> volumeList = new ArrayList<>();
         if (storage instanceof EphemeralStorage) {
             volumeList.add(createEmptyDirVolume(VOLUME_NAME));
@@ -652,8 +573,9 @@ public class KafkaCluster extends AbstractModel {
         if (rack != null || isExposedWithNodePort()) {
             volumeList.add(createEmptyDirVolume(INIT_VOLUME_NAME));
         }
-        volumeList.add(createSecretVolume(BROKER_CERTS_VOLUME, KafkaCluster.brokersSecretName(cluster)));
-        volumeList.add(createSecretVolume(CLIENT_CA_CERTS_VOLUME, KafkaCluster.clientsPublicKeyName(cluster)));
+        volumeList.add(createSecretVolume(CLUSTER_CA_CERTS_VOLUME, AbstractModel.getClusterCaName(cluster), isOpenShift));
+        volumeList.add(createSecretVolume(BROKER_CERTS_VOLUME, KafkaCluster.brokersSecretName(cluster), isOpenShift));
+        volumeList.add(createSecretVolume(CLIENT_CA_CERTS_VOLUME, KafkaCluster.clientsPublicKeyName(cluster), isOpenShift));
         volumeList.add(createConfigMapVolume(logAndMetricsConfigVolumeName, ancillaryConfigName));
 
         return volumeList;
@@ -671,6 +593,7 @@ public class KafkaCluster extends AbstractModel {
         List<VolumeMount> volumeMountList = new ArrayList<>();
         volumeMountList.add(createVolumeMount(VOLUME_NAME, mountPath));
 
+        volumeMountList.add(createVolumeMount(CLUSTER_CA_CERTS_VOLUME, CLUSTER_CA_CERTS_VOLUME_MOUNT));
         volumeMountList.add(createVolumeMount(BROKER_CERTS_VOLUME, BROKER_CERTS_VOLUME_MOUNT));
         volumeMountList.add(createVolumeMount(CLIENT_CA_CERTS_VOLUME, CLIENT_CA_CERTS_VOLUME_MOUNT));
         volumeMountList.add(createVolumeMount(logAndMetricsConfigVolumeName, logAndMetricsConfigMountPath));
@@ -766,12 +689,16 @@ public class KafkaCluster extends AbstractModel {
 
         Resources tlsSidecarResources = (tlsSidecar != null) ? tlsSidecar.getResources() : null;
 
+        TlsSidecarLogLevel tlsSidecarLogLevel = (tlsSidecar != null) ? tlsSidecar.getLogLevel() : TlsSidecarLogLevel.NOTICE;
+
         Container tlsSidecarContainer = new ContainerBuilder()
                 .withName(TLS_SIDECAR_NAME)
                 .withImage(tlsSidecarImage)
                 .withResources(resources(tlsSidecarResources))
-                .withEnv(singletonList(buildEnvVar(ENV_VAR_KAFKA_ZOOKEEPER_CONNECT, zookeeperConnect)))
-                .withVolumeMounts(createVolumeMount(BROKER_CERTS_VOLUME, TLS_SIDECAR_VOLUME_MOUNT))
+                .withEnv(asList(buildEnvVar(ENV_VAR_KAFKA_ZOOKEEPER_CONNECT, zookeeperConnect),
+                        buildEnvVar(ENV_VAR_TLS_SIDECAR_LOG_LEVEL, tlsSidecarLogLevel.toValue())))
+                .withVolumeMounts(createVolumeMount(BROKER_CERTS_VOLUME, TLS_SIDECAR_KAFKA_CERTS_VOLUME_MOUNT),
+                        createVolumeMount(CLUSTER_CA_CERTS_VOLUME, TLS_SIDECAR_CLUSTER_CA_CERTS_VOLUME_MOUNT))
                 .build();
 
         containers.add(container);
@@ -817,6 +744,7 @@ public class KafkaCluster extends AbstractModel {
             if (listeners.getExternal() != null) {
                 varList.add(buildEnvVar(ENV_VAR_KAFKA_EXTERNAL_ENABLED, listeners.getExternal().getType()));
                 varList.add(buildEnvVar(ENV_VAR_KAFKA_EXTERNAL_ADDRESSES, String.join(" ", externalAddresses.values())));
+                varList.add(buildEnvVar(ENV_VAR_KAFKA_EXTERNAL_TLS, Boolean.toString(isExposedWithTls())));
 
                 if (listeners.getExternal().getAuth() != null) {
                     varList.add(buildEnvVar(ENV_VAR_KAFKA_EXTERNAL_AUTHENTICATION, listeners.getExternal().getAuth().getType()));
@@ -849,7 +777,7 @@ public class KafkaCluster extends AbstractModel {
         this.initImage = initImage;
     }
 
-    protected void setTlsSidecar(Sidecar tlsSidecar) {
+    protected void setTlsSidecar(TlsSidecar tlsSidecar) {
         this.tlsSidecar = tlsSidecar;
     }
 
@@ -904,6 +832,8 @@ public class KafkaCluster extends AbstractModel {
     }
 
     public NetworkPolicy generateNetworkPolicy() {
+        List<NetworkPolicyIngressRule> rules = new ArrayList<>(5);
+
         // Restrict access to 9091 / replication port
         NetworkPolicyPort replicationPort = new NetworkPolicyPort();
         replicationPort.setPort(new IntOrString(REPLICATION_PORT));
@@ -927,30 +857,58 @@ public class KafkaCluster extends AbstractModel {
                 .withFrom(kafkaClusterPeer, entityOperatorPeer)
                 .build();
 
+        rules.add(replicationRule);
+
         // Free access to 9092, 9093 and 9094 ports
-        NetworkPolicyPort plainPort = new NetworkPolicyPort();
-        plainPort.setPort(new IntOrString(CLIENT_PORT));
+        if (listeners != null) {
+            if (listeners.getPlain() != null) {
+                NetworkPolicyPort plainPort = new NetworkPolicyPort();
+                plainPort.setPort(new IntOrString(CLIENT_PORT));
 
-        NetworkPolicyIngressRule plainRule = new NetworkPolicyIngressRuleBuilder()
-                .withPorts(plainPort)
-                .withFrom()
-                .build();
+                NetworkPolicyIngressRule plainRule = new NetworkPolicyIngressRuleBuilder()
+                        .withPorts(plainPort)
+                        .withFrom()
+                        .build();
 
-        NetworkPolicyPort tlsPort = new NetworkPolicyPort();
-        tlsPort.setPort(new IntOrString(CLIENT_TLS_PORT));
+                rules.add(plainRule);
+            }
 
-        NetworkPolicyIngressRule tlsRule = new NetworkPolicyIngressRuleBuilder()
-                .withPorts(tlsPort)
-                .withFrom()
-                .build();
+            if (listeners.getTls() != null) {
+                NetworkPolicyPort tlsPort = new NetworkPolicyPort();
+                tlsPort.setPort(new IntOrString(CLIENT_TLS_PORT));
 
-        NetworkPolicyPort externalPort = new NetworkPolicyPort();
-        externalPort.setPort(new IntOrString(EXTERNAL_PORT));
+                NetworkPolicyIngressRule tlsRule = new NetworkPolicyIngressRuleBuilder()
+                        .withPorts(tlsPort)
+                        .withFrom()
+                        .build();
 
-        NetworkPolicyIngressRule externalRule = new NetworkPolicyIngressRuleBuilder()
-                .withPorts(externalPort)
-                .withFrom()
-                .build();
+                rules.add(tlsRule);
+            }
+
+            if (isExposed()) {
+                NetworkPolicyPort externalPort = new NetworkPolicyPort();
+                externalPort.setPort(new IntOrString(EXTERNAL_PORT));
+
+                NetworkPolicyIngressRule externalRule = new NetworkPolicyIngressRuleBuilder()
+                        .withPorts(externalPort)
+                        .withFrom()
+                        .build();
+
+                rules.add(externalRule);
+            }
+        }
+
+        if (isMetricsEnabled) {
+            NetworkPolicyPort metricsPort = new NetworkPolicyPort();
+            metricsPort.setPort(new IntOrString(METRICS_PORT));
+
+            NetworkPolicyIngressRule metricsRule = new NetworkPolicyIngressRuleBuilder()
+                    .withPorts(metricsPort)
+                    .withFrom()
+                    .build();
+
+            rules.add(metricsRule);
+        }
 
         NetworkPolicy networkPolicy = new NetworkPolicyBuilder()
                 .withNewMetadata()
@@ -961,7 +919,7 @@ public class KafkaCluster extends AbstractModel {
                 .endMetadata()
                 .withNewSpec()
                     .withPodSelector(labelSelector)
-                    .withIngress(replicationRule, plainRule, tlsRule, externalRule)
+                    .withIngress(rules)
                 .endSpec()
                 .build();
 
@@ -1029,5 +987,24 @@ public class KafkaCluster extends AbstractModel {
      */
     public boolean isExposedWithNodePort()  {
         return isExposed() && listeners.getExternal() instanceof KafkaListenerExternalNodePort;
+    }
+
+    /**
+     * Returns true when the Kafka cluster is exposed to the outside of OpenShift with TLS enabled
+     *
+     * @return
+     */
+    public boolean isExposedWithTls() {
+        if (isExposed() && listeners.getExternal() instanceof KafkaListenerExternalRoute)   {
+            return true;
+        } else if (isExposed())   {
+            if (listeners.getExternal() instanceof KafkaListenerExternalLoadBalancer) {
+                return ((KafkaListenerExternalLoadBalancer) listeners.getExternal()).isTls();
+            } else if (listeners.getExternal() instanceof KafkaListenerExternalNodePort)    {
+                return ((KafkaListenerExternalNodePort) listeners.getExternal()).isTls();
+            }
+        }
+
+        return false;
     }
 }
