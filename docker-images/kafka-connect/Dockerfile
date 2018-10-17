@@ -16,7 +16,7 @@ ENV KAFKA_CONNECT_PLUGIN_PATH="${KAFKA_HOME}/plugins" \
 #
 RUN eval $MD5SUMS && \
 		mkdir $KAFKA_CONNECT_PLUGIN_PATH; \
-		for CONNECTOR in {mongodb,mysql,postgres}; do \
+		for CONNECTOR in {mysql,mongodb,postgres}; do \
     curl -fSL -o /tmp/plugin.tar.gz \
                  $MAVEN_REPO_CORE/io/debezium/debezium-connector-$CONNECTOR/$DEBEZIUM_VERSION/debezium-connector-$CONNECTOR-$DEBEZIUM_VERSION-plugin.tar.gz &&\
     declare MD5_PARAM_NAME="${CONNECTOR^^}_MD5" &&\
